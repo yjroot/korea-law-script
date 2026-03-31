@@ -190,6 +190,9 @@ def init_repo(repo_dir: str):
         }
         git_cmd(["commit", "-m", "Initial commit: 프로젝트 설명"], cwd=repo_dir, env=env)
 
+    # remote 설정
+    git_cmd(["remote", "add", "origin", "git@github.com:yjroot/korea-law.git"], cwd=repo_dir)
+
     print(f"저장소 초기화 완료: {repo_dir}")
 
 
@@ -227,6 +230,8 @@ def main():
     success = 0
     fail = 0
     skip = 0
+    commits_since_push = 0
+    push_interval = 100
 
     for rev in tqdm(history, desc="연혁 커밋 생성"):
         ok = process_revision(rev)
@@ -234,11 +239,20 @@ def main():
             committed = create_commit(rev, repo_dir)
             if committed:
                 success += 1
+                commits_since_push += 1
+
+                if commits_since_push >= push_interval:
+                    git_cmd(["push", "--force", "origin", "main"], cwd=repo_dir)
+                    commits_since_push = 0
             else:
                 skip += 1
         else:
             fail += 1
         time.sleep(REQUEST_DELAY)
+
+    # 마지막 남은 커밋 push
+    if commits_since_push > 0:
+        git_cmd(["push", "--force", "origin", "main"], cwd=repo_dir)
 
     print(f"\n완료: 커밋 {success}건, 스킵 {skip}건, 실패 {fail}건")
     print(f"git log --oneline | head -20 으로 확인하세요.")
