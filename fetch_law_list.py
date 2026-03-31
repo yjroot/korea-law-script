@@ -68,14 +68,14 @@ def fetch_all_laws() -> list[dict]:
     laws = []
 
     # 첫 페이지 결과 처리
-    for item in root.iter("법령"):
+    for item in root.iter("law"):
         laws.append(parse_item(item))
 
     # 나머지 페이지
     for page in tqdm(range(2, total_pages + 1), desc="법령 목록 수집", initial=1, total=total_pages):
         time.sleep(REQUEST_DELAY)
         root = fetch_page(page)
-        for item in root.iter("법령"):
+        for item in root.iter("law"):
             laws.append(parse_item(item))
 
     print(f"수집 완료: {len(laws)}건")

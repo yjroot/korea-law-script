@@ -11,10 +11,10 @@ from tqdm import tqdm
 
 from config import (
     API_KEY,
-    LAW_TYPE_DIR,
     OUTPUT_DIR,
     REQUEST_DELAY,
     SERVICE_URL,
+    get_law_type_dir,
 )
 
 
@@ -44,21 +44,33 @@ def extract_metadata(root: ET.Element) -> dict:
     if info is None:
         info = root
 
-    def text(tag: str, parent=None) -> str:
-        el = (parent or info).find(tag)
+    def text(tag: str) -> str:
+        # 기본정보 내에서 먼저 찾고, 없으면 전체에서 탐색
+        el = info.find(tag)
         if el is None:
             el = root.find(f".//{tag}")
         return el.text.strip() if el is not None and el.text else ""
 
+    # 소관부처는 태그 텍스트가 아닌 경우도 있음
+    소관부처_el = info.find("소관부처")
+    if 소관부처_el is None:
+        소관부처_el = root.find(".//소관부처")
+    소관부처 = 소관부처_el.text.strip() if 소관부처_el is not None and 소관부처_el.text else ""
+
+    # 법종구분은 태그 텍스트
+    법종_el = info.find("법종구분")
+    if 법종_el is None:
+        법종_el = root.find(".//법종구분")
+    법종구분 = 법종_el.text.strip() if 법종_el is not None and 법종_el.text else ""
+
     return {
-        "법령명": text("법령명한글"),
+        "법령명": text("법령명_한글"),
         "법령ID": text("법령ID"),
-        "법령일련번호": text("법령일련번호"),
-        "법령구분": text("법령구분명"),
+        "법령구분": 법종구분,
         "공포일자": text("공포일자"),
         "공포번호": text("공포번호"),
         "시행일자": text("시행일자"),
-        "소관부처": text("소관부처명"),
+        "소관부처": 소관부처,
     }
 
 
@@ -74,7 +86,6 @@ def build_frontmatter(meta: dict) -> str:
     lines = ["---"]
     lines.append(f'법령명: "{meta["법령명"]}"')
     lines.append(f'법령ID: "{meta["법령ID"]}"')
-    lines.append(f'법령일련번호: {meta["법령일련번호"]}')
     lines.append(f'법령구분: "{meta["법령구분"]}"')
     lines.append(f'공포일자: "{format_date(meta["공포일자"])}"')
     lines.append(f'공포번호: {meta["공포번호"] or 0}')
@@ -86,38 +97,45 @@ def build_frontmatter(meta: dict) -> str:
 
 
 def xml_text(el: ET.Element | None) -> str:
-    """XML 요소의 텍스트를 안전하게 추출한다. 내부 태그 포함."""
+    """XML 요소의 텍스트를 안전하게 추출한다."""
     if el is None:
         return ""
-    # itertext()로 모든 하위 텍스트 결합
-    text = "".join(el.itertext()).strip()
-    return text
+    return (el.text or "").strip()
+
+
+def clean_article_content(content: str) -> str:
+    """조문 내용에서 조번호+제목 접두사를 제거한다.
+
+    예: '제1조(목적) 이 법은...' → '이 법은...'
+    """
+    # 제N조(제목) 또는 제N조의N(제목) 패턴 제거
+    cleaned = re.sub(r'^제\d+조(?:의\d+)?\s*(?:\([^)]*\)\s*)?', '', content)
+    return cleaned.strip()
 
 
 def convert_articles(root: ET.Element) -> str:
     """조문 XML을 Markdown 본문으로 변환한다."""
     lines = []
 
-    # 편/장/절/관 구조 추적을 위한 현재 헤딩
     for jo in root.iter("조문단위"):
         jo_num = xml_text(jo.find("조문번호"))
         jo_title = xml_text(jo.find("조문제목"))
         jo_content = xml_text(jo.find("조문내용"))
+        jo_type = xml_text(jo.find("조문여부"))
 
-        # 편, 장, 절, 관 구분
-        jo_type = xml_text(jo.find("조문구분"))
-
-        if jo_type == "편":
-            lines.append(f"\n## {jo_content or jo_title}\n")
-            continue
-        elif jo_type == "장":
-            lines.append(f"\n### {jo_content or jo_title}\n")
-            continue
-        elif jo_type == "절":
-            lines.append(f"\n#### {jo_content or jo_title}\n")
-            continue
-        elif jo_type == "관":
-            lines.append(f"\n##### {jo_content or jo_title}\n")
+        # 편, 장, 절, 관은 조문여부가 아닌 조문내용으로 판별
+        if jo_type != "조문" and jo_content:
+            # 편장절관 등의 구조적 제목
+            if re.match(r'제\d+편\s', jo_content):
+                lines.append(f"\n## {jo_content.strip()}\n")
+            elif re.match(r'제\d+장\s', jo_content):
+                lines.append(f"\n### {jo_content.strip()}\n")
+            elif re.match(r'제\d+절\s', jo_content):
+                lines.append(f"\n#### {jo_content.strip()}\n")
+            elif re.match(r'제\d+관\s', jo_content):
+                lines.append(f"\n##### {jo_content.strip()}\n")
+            else:
+                lines.append(f"\n## {jo_content.strip()}\n")
             continue
 
         # 일반 조문
@@ -126,33 +144,35 @@ def convert_articles(root: ET.Element) -> str:
         elif jo_num:
             lines.append(f"\n###### 제{jo_num}조\n")
 
-        if jo_content:
-            lines.append(jo_content)
-            lines.append("")
+        # 직접 자식인 항이 있는지 확인
+        hangs = list(jo.findall("항"))
 
-        # 항
-        for hang in jo.iter("항"):
-            hang_num = xml_text(hang.find("항번호"))
-            hang_content = xml_text(hang.find("항내용"))
-            if hang_content:
-                # 항 번호가 있으면 원문자로 표시
-                if hang_num:
+        if hangs:
+            # 항이 있는 경우: 조문내용은 보통 항 내용과 중복이므로 스킵
+            for hang in hangs:
+                hang_content = xml_text(hang.find("항내용"))
+                if hang_content:
                     lines.append(hang_content)
-                else:
-                    lines.append(hang_content)
+
+                # 호 (항의 직접 자식)
+                for ho in hang.findall("호"):
+                    ho_content = xml_text(ho.find("호내용"))
+                    if ho_content:
+                        lines.append(f"  {ho_content}")
+
+                    # 목 (호의 직접 자식)
+                    for mok in ho.findall("목"):
+                        mok_content = xml_text(mok.find("목내용"))
+                        if mok_content:
+                            lines.append(f"    {mok_content}")
+
                 lines.append("")
-
-            # 호
-            for ho in hang.iter("호"):
-                ho_content = xml_text(ho.find("호내용"))
-                if ho_content:
-                    lines.append(f"  {ho_content}")
-
-                # 목
-                for mok in ho.iter("목"):
-                    mok_content = xml_text(mok.find("목내용"))
-                    if mok_content:
-                        lines.append(f"    {mok_content}")
+        elif jo_content:
+            # 항이 없는 단순 조문
+            body = clean_article_content(jo_content)
+            if body:
+                lines.append(body)
+                lines.append("")
 
     return "\n".join(lines)
 
@@ -207,7 +227,7 @@ def convert_law_to_markdown(root: ET.Element) -> str:
 
 def get_output_dir(law_type: str) -> Path:
     """법령 유형에 따른 출력 디렉토리를 반환한다."""
-    dir_name = LAW_TYPE_DIR.get(law_type, "기타")
+    dir_name = get_law_type_dir(law_type)
     return Path(OUTPUT_DIR) / "korea" / dir_name
 
 
