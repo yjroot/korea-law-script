@@ -251,7 +251,7 @@ def convert_law_to_markdown(root: ET.Element) -> str:
 def get_output_dir(law_type: str) -> Path:
     """법령 유형에 따른 출력 디렉토리를 반환한다."""
     dir_name = get_law_type_dir(law_type)
-    return Path(OUTPUT_DIR) / "korea" / dir_name
+    return Path(OUTPUT_DIR) / dir_name
 
 
 def process_single_law(law: dict) -> Path | None:
@@ -296,7 +296,7 @@ def main():
 
     laws = json.loads(law_list_path.read_text(encoding="utf-8"))
     print(f"총 {len(laws)}개 법령을 변환합니다.")
-    print(f"출력 경로: {OUTPUT_DIR}/korea/")
+    print(f"출력 경로: {OUTPUT_DIR}/")
 
     success = 0
     fail = 0

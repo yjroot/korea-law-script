@@ -73,7 +73,7 @@ def format_git_date(date_str: str) -> str:
 def get_output_path(law_name: str, law_type: str) -> Path:
     """법령의 출력 경로를 반환한다."""
     dir_name = get_law_type_dir(law_type)
-    return Path(OUTPUT_DIR) / "korea" / dir_name / (sanitize_filename(law_name) + ".md")
+    return Path(OUTPUT_DIR) / dir_name / (sanitize_filename(law_name) + ".md")
 
 
 def process_revision(revision: dict) -> bool:
@@ -168,10 +168,10 @@ def init_repo(repo_dir: str):
     if git_dir.exists():
         shutil.rmtree(git_dir)
 
-    # 기존 법령 파일 삭제
-    korea_dir = Path(repo_dir) / "korea"
-    if korea_dir.exists():
-        shutil.rmtree(korea_dir)
+    # 기존 법령 디렉토리 삭제
+    for item in Path(repo_dir).iterdir():
+        if item.is_dir() and item.name not in (".git",):
+            shutil.rmtree(item)
 
     # git init
     git_cmd(["init"], cwd=repo_dir)
