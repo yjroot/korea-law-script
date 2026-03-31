@@ -19,9 +19,32 @@ from config import (
 
 
 def sanitize_filename(name: str) -> str:
-    """파일명에 사용할 수 없는 문자를 제거한다."""
+    """파일명에 사용할 수 없는 문자를 제거하고 길이를 제한한다.
+
+    파일시스템 제한(255바이트)을 고려하여 ".md" 확장자 포함
+    최대 250바이트로 제한한다. 초과 시 해시를 붙여 고유성을 보장한다.
+    """
+    import hashlib
+
     name = re.sub(r'[<>:"/\\|?*]', "", name)
     name = name.strip(". ")
+
+    # .md 확장자(3바이트) 포함 255바이트 이내로 제한
+    max_bytes = 250
+    encoded = name.encode("utf-8")
+    if len(encoded) > max_bytes:
+        # 해시 8자리 추가 (9바이트: _+8자)
+        name_hash = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+        truncated = max_bytes - 9
+        # UTF-8 멀티바이트 경계에서 잘리지 않도록
+        while truncated > 0:
+            try:
+                short = encoded[:truncated].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                truncated -= 1
+        name = f"{short}_{name_hash}"
+
     return name
 
 
