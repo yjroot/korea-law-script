@@ -5,25 +5,28 @@
     2. fetch_history.py 실행 (연혁 목록)
     3. build_history.py 실행 (Git 커밋 생성)
 
-주의: korea-law 저장소를 초기화(git init)한 후 실행해야 한다.
+주의: korea-law 저장소를 완전히 초기화한 후 실행한다.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import requests
 from tqdm import tqdm
 
-from config import API_KEY, OUTPUT_DIR, REQUEST_DELAY, SERVICE_URL, get_law_type_dir
+from config import API_KEY, OUTPUT_DIR, REQUEST_DELAY, get_law_type_dir
 from fetch_law_content import (
     convert_law_to_markdown,
     fetch_law_content,
     sanitize_filename,
 )
+
+# 커밋 작성자 정보
+AUTHOR_NAME = "korea-law-bot"
+AUTHOR_EMAIL = "bot@korea-law"
 
 
 def git_cmd(args: list[str], cwd: str, env: dict | None = None) -> str:
@@ -41,8 +44,15 @@ def git_cmd(args: list[str], cwd: str, env: dict | None = None) -> str:
     if result.returncode != 0:
         combined = result.stdout + result.stderr
         if "nothing to commit" not in combined:
-            print(f"\n[git 오류] git {' '.join(args)}: {combined.strip()[:200]}")
+            print(f"\n[git 오류] git {' '.join(args[:3])}: {combined.strip()[:200]}")
     return result.stdout.strip()
+
+
+def format_date_display(date_str: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD 표시용."""
+    if len(date_str) == 8:
+        return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    return date_str
 
 
 def format_git_date(date_str: str) -> str:
@@ -66,7 +76,7 @@ def get_output_path(law_name: str, law_type: str) -> Path:
     return Path(OUTPUT_DIR) / "korea" / dir_name / (sanitize_filename(law_name) + ".md")
 
 
-def process_revision(revision: dict, repo_dir: str) -> bool:
+def process_revision(revision: dict) -> bool:
     """단일 연혁 버전을 처리하여 파일을 생성/수정한다."""
     mst = revision["법령일련번호"]
     name = revision["법령명한글"]
@@ -90,35 +100,52 @@ def process_revision(revision: dict, repo_dir: str) -> bool:
     return True
 
 
-def create_commit(revision: dict, repo_dir: str) -> bool:
-    """연혁 버전에 대한 Git 커밋을 생성한다."""
+def build_commit_message(revision: dict) -> str:
+    """연혁 정보로 커밋 메시지를 생성한다."""
     name = revision["법령명한글"]
     amend_type = revision["제개정구분명"]
     pub_date = revision["공포일자"]
-    pub_no = revision.get("공포번호", "")
+    ef_date = revision["시행일자"]
+    pub_no = revision.get("공포번호", "").strip()
+    ministry = revision.get("소관부처명", "").strip()
+    law_type = revision.get("법령구분명", "").strip()
 
-    # 커밋 메시지 생성
-    if amend_type == "제정":
-        msg = f"{name} 제정"
-    elif amend_type == "전부개정":
-        msg = f"{name} 전부개정"
-    elif amend_type == "일부개정":
-        msg = f"{name} 일부개정"
-    elif amend_type == "타법개정":
-        msg = f"{name} 타법개정"
-    elif amend_type == "폐지":
-        msg = f"{name} 폐지"
-    else:
-        msg = f"{name} {amend_type}"
+    # 제목줄
+    title = f"{name} {amend_type}"
 
+    # 본문
+    body_lines = []
+    body_lines.append(f"법령구분: {law_type}")
     if pub_no:
-        msg += f" ({pub_no})"
+        body_lines.append(f"공포번호: {pub_no}")
+    body_lines.append(f"공포일자: {format_date_display(pub_date)}")
+    body_lines.append(f"시행일자: {format_date_display(ef_date)}")
+    if ministry:
+        body_lines.append(f"소관부처: {ministry}")
+
+    # 1970년 이전 날짜인 경우 안내
+    if len(pub_date) == 8 and int(pub_date[:4]) < 1970:
+        body_lines.append("")
+        body_lines.append(f"(실제 공포일: {format_date_display(pub_date)}, Git 제한으로 커밋 날짜는 1970-01-01)")
+
+    return title + "\n\n" + "\n".join(body_lines)
+
+
+def create_commit(revision: dict, repo_dir: str) -> bool:
+    """연혁 버전에 대한 Git 커밋을 생성한다."""
+    pub_date = revision["공포일자"]
 
     git_date = format_git_date(pub_date)
     date_env = {
         "GIT_AUTHOR_DATE": git_date,
         "GIT_COMMITTER_DATE": git_date,
+        "GIT_AUTHOR_NAME": AUTHOR_NAME,
+        "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
+        "GIT_COMMITTER_NAME": AUTHOR_NAME,
+        "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
     }
+
+    msg = build_commit_message(revision)
 
     # 변경 사항 스테이징
     git_cmd(["add", "-A"], cwd=repo_dir)
@@ -131,6 +158,39 @@ def create_commit(revision: dict, repo_dir: str) -> bool:
     # 커밋
     git_cmd(["commit", "-m", msg], cwd=repo_dir, env=date_env)
     return True
+
+
+def init_repo(repo_dir: str):
+    """저장소를 완전히 초기화한다."""
+    git_dir = Path(repo_dir) / ".git"
+
+    # 기존 .git 삭제
+    if git_dir.exists():
+        shutil.rmtree(git_dir)
+
+    # 기존 법령 파일 삭제
+    korea_dir = Path(repo_dir) / "korea"
+    if korea_dir.exists():
+        shutil.rmtree(korea_dir)
+
+    # git init
+    git_cmd(["init"], cwd=repo_dir)
+    git_cmd(["config", "user.name", AUTHOR_NAME], cwd=repo_dir)
+    git_cmd(["config", "user.email", AUTHOR_EMAIL], cwd=repo_dir)
+
+    # README를 root commit으로
+    readme_path = Path(repo_dir) / "README.md"
+    if readme_path.exists():
+        git_cmd(["add", "README.md"], cwd=repo_dir)
+        env = {
+            "GIT_AUTHOR_NAME": AUTHOR_NAME,
+            "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
+            "GIT_COMMITTER_NAME": AUTHOR_NAME,
+            "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
+        }
+        git_cmd(["commit", "-m", "Initial commit: 프로젝트 설명"], cwd=repo_dir, env=env)
+
+    print(f"저장소 초기화 완료: {repo_dir}")
 
 
 def main():
@@ -161,28 +221,15 @@ def main():
     repo_dir = OUTPUT_DIR
     print(f"저장소 경로: {repo_dir}")
 
-    # 저장소 초기화 확인
-    git_dir = Path(repo_dir) / ".git"
-    if not git_dir.exists():
-        print("Git 저장소를 초기화합니다.")
-        git_cmd(["init"], cwd=repo_dir)
-
-    # 기존 법령 파일 삭제 (연혁부터 다시 쌓기 위해)
-    korea_dir = Path(repo_dir) / "korea"
-    if korea_dir.exists():
-        import shutil
-        shutil.rmtree(korea_dir)
-        git_cmd(["add", "-A"], cwd=repo_dir)
-        status = git_cmd(["status", "--porcelain"], cwd=repo_dir)
-        if status:
-            git_cmd(["commit", "-m", "초기화: 연혁 기반 재구성 시작"], cwd=repo_dir)
+    # 저장소 완전 초기화
+    init_repo(repo_dir)
 
     success = 0
     fail = 0
     skip = 0
 
     for rev in tqdm(history, desc="연혁 커밋 생성"):
-        ok = process_revision(rev, repo_dir)
+        ok = process_revision(rev)
         if ok:
             committed = create_commit(rev, repo_dir)
             if committed:
