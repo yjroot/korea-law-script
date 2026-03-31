@@ -173,8 +173,8 @@ def init_repo(repo_dir: str):
         if item.is_dir() and item.name not in (".git",):
             shutil.rmtree(item)
 
-    # git init
-    git_cmd(["init"], cwd=repo_dir)
+    # git init (main 브랜치로)
+    git_cmd(["init", "-b", "main"], cwd=repo_dir)
     git_cmd(["config", "user.name", AUTHOR_NAME], cwd=repo_dir)
     git_cmd(["config", "user.email", AUTHOR_EMAIL], cwd=repo_dir)
 
