@@ -35,7 +35,7 @@ def fetch_history_html(query: str, page: int = 1) -> str:
         "page": page,
         "sort": "efasc",  # 시행일자 오름차순
     }
-    resp = requests.get(SEARCH_URL, params=params, timeout=30)
+    resp = requests.get(SEARCH_URL, params=params, timeout=60)
     resp.raise_for_status()
     return resp.text
 

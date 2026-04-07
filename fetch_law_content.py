@@ -48,7 +48,7 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-def fetch_law_content(mst: str) -> ET.Element:
+def fetch_law_content(mst: str, retries: int = 3) -> ET.Element:
     """법령 본문 XML을 조회한다."""
     params = {
         "OC": API_KEY,
@@ -56,9 +56,18 @@ def fetch_law_content(mst: str) -> ET.Element:
         "type": "XML",
         "MST": mst,
     }
-    resp = requests.get(SERVICE_URL, params=params, timeout=60)
-    resp.raise_for_status()
-    return ET.fromstring(resp.content)
+    for attempt in range(retries):
+        try:
+            resp = requests.get(SERVICE_URL, params=params, timeout=60)
+            resp.raise_for_status()
+            return ET.fromstring(resp.content)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt < retries - 1:
+                wait = 5 * (attempt + 1)
+                print(f"\n[재시도] MST={mst} 요청 실패 ({e}), {wait}초 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def extract_metadata(root: ET.Element) -> dict:

@@ -21,6 +21,7 @@ from fetch_law_content import (
     fetch_law_content,
     sanitize_filename,
 )
+from fetch_history import fetch_law_history
 
 # 커밋 작성자 정보
 AUTHOR_NAME = "korea-law-bot"
@@ -141,11 +142,14 @@ def find_changes(existing: dict[str, dict], api_laws: list[dict]) -> dict:
     return {"added": added, "modified": modified, "removed": removed}
 
 
-def process_law(law: dict, existing_filepath: str | None = None) -> bool:
+def process_law(law: dict, existing_filepath: str | None = None) -> str | None:
     """법령 콘텐츠를 가져와 마크다운 파일로 저장한다.
 
     existing_filepath가 주어지면 해당 경로에 덮어쓴다 (수정 시).
     없으면 get_output_path로 새 경로를 생성한다 (추가 시).
+
+    Returns:
+        성공 시 저장된 파일 경로 문자열, 실패 시 None.
     """
     mst = law["법령일련번호"]
     name = law["법령명한글"]
@@ -155,27 +159,34 @@ def process_law(law: dict, existing_filepath: str | None = None) -> bool:
         root = fetch_law_content(mst)
     except Exception as e:
         print(f"[오류] {name} (MST={mst}) 조회 실패: {e}")
-        return False
+        return None
 
     try:
         markdown = convert_law_to_markdown(root)
     except Exception as e:
         print(f"[오류] {name} (MST={mst}) 변환 실패: {e}")
-        return False
+        return None
 
+    new_filepath = get_output_path(name, law_type)
+    new_filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    # 법령명이 바뀌어 경로가 달라진 경우, 기존 파일 삭제
     if existing_filepath:
-        filepath = Path(existing_filepath)
-    else:
-        filepath = get_output_path(name, law_type)
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    filepath.write_text(markdown, encoding="utf-8")
-    return True
+        old_path = Path(existing_filepath)
+        if old_path != new_filepath and old_path.is_file():
+            old_path.unlink()
+
+    new_filepath.write_text(markdown, encoding="utf-8")
+    return str(new_filepath)
 
 
 def remove_law_file(law_info: dict):
     """폐지된 법령의 파일을 삭제한다."""
-    filepath = Path(law_info.get("filepath", ""))
-    if filepath.exists():
+    filepath_str = law_info.get("filepath", "")
+    if not filepath_str:
+        return
+    filepath = Path(filepath_str)
+    if filepath.is_file():
         filepath.unlink()
         print(f"[삭제] {law_info.get('법령명', filepath.stem)}")
 
@@ -233,9 +244,15 @@ def format_date(date_str: str) -> str:
 
 
 def format_git_date(date_str: str) -> str:
-    """공포일자(YYYYMMDD)를 Git 날짜 형식으로 변환한다."""
+    """공포일자(YYYYMMDD)를 Git 날짜 형식으로 변환한다.
+
+    Git은 1970-01-01 이전 날짜를 지원하지 않으므로 대체한다.
+    """
     date_str = date_str.replace("-", "")
     if len(date_str) == 8:
+        year = int(date_str[:4])
+        if year < 1970:
+            return "1970-01-01 12:00:00 +0900"
         return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 12:00:00 +0900"
     return date_str
 
@@ -297,38 +314,107 @@ def main():
         print("변경 사항 없음. 종료합니다.")
         return
 
-    commits = 0
+    # 4. 모든 변경을 작업 목록으로 수집
+    #    각 작업: {"action", "law", "pub_date", "existing_filepath"}
+    tasks = []
 
-    # 4. 삭제된 법령 처리 (각각 커밋)
+    # 삭제된 법령
     for law_info in changes["removed"]:
-        remove_law_file(law_info)
-        msg = build_commit_message(law_info, "폐지")
-        pub_date = law_info.get("공포일자", "")
-        if commit_one(repo_dir, msg, pub_date=pub_date):
-            commits += 1
+        tasks.append({
+            "action": "폐지",
+            "law": law_info,
+            "pub_date": law_info.get("공포일자", "").replace("-", ""),
+            "existing_filepath": law_info.get("filepath"),
+        })
 
-    # 5. 추가/수정된 법령 처리 (각각 커밋)
-    to_update = changes["added"] + changes["modified"]
+    # 추가된 법령
+    for law in changes["added"]:
+        tasks.append({
+            "action": "신규",
+            "law": law,
+            "pub_date": law.get("공포일자", ""),
+            "existing_filepath": None,
+        })
+
+    # 수정된 법령: 연혁 조회하여 중간 개정 포함
+    for law in tqdm(changes["modified"], desc="변경 법령 연혁 조회"):
+        existing_path = law.get("_existing_filepath")
+        ex_pub = existing.get(law["법령ID"], {}).get("공포일자", "").replace("-", "")
+
+        try:
+            history = fetch_law_history(law["법령명한글"])
+            time.sleep(REQUEST_DELAY)
+        except Exception as e:
+            print(f"[오류] {law['법령명한글']} 연혁 조회 실패: {e}")
+            # 연혁 조회 실패 시 현행 버전만 추가
+            tasks.append({
+                "action": "변경",
+                "law": law,
+                "pub_date": law.get("공포일자", ""),
+                "existing_filepath": existing_path,
+            })
+            continue
+
+        # 기존 공포일자 이후의 개정만 필터
+        newer = [h for h in history if h["공포일자"] > ex_pub]
+
+        if not newer:
+            tasks.append({
+                "action": "변경",
+                "law": law,
+                "pub_date": law.get("공포일자", ""),
+                "existing_filepath": existing_path,
+            })
+        else:
+            for rev in newer:
+                tasks.append({
+                    "action": "변경",
+                    "law": rev,
+                    "pub_date": rev.get("공포일자", ""),
+                    "existing_filepath": existing_path,
+                })
+
+    # 5. 공포일자 기준 시간순 정렬
+    tasks.sort(key=lambda t: t["pub_date"])
+    print(f"총 {len(tasks)}건의 작업을 시간순으로 처리합니다.")
+
+    # 6. 시간순으로 처리 및 커밋
+    commits = 0
     success = 0
     fail = 0
+    # 법령ID → 최신 파일 경로 추적 (같은 법령의 연속 개정 시 경로 갱신)
+    path_tracker: dict[str, str] = {}
 
-    for law in tqdm(to_update, desc="법령 업데이트"):
-        existing_path = law.get("_existing_filepath")
-        if process_law(law, existing_filepath=existing_path):
-            is_added = law in changes["added"]
-            action = "신규" if is_added else "변경"
+    for task in tqdm(tasks, desc="법령 커밋"):
+        law = task["law"]
+        action = task["action"]
+        pub_date = task["pub_date"]
+        law_id = law.get("법령ID", "")
+
+        # 이전 처리에서 갱신된 경로가 있으면 우선 사용
+        existing_path = path_tracker.get(law_id) or task["existing_filepath"]
+
+        if action == "폐지":
+            remove_law_file(law)
             msg = build_commit_message(law, action)
-            pub_date = law.get("공포일자", "")
             if commit_one(repo_dir, msg, pub_date=pub_date):
                 commits += 1
             success += 1
         else:
-            fail += 1
-        time.sleep(REQUEST_DELAY)
+            written_path = process_law(law, existing_filepath=existing_path)
+            if written_path:
+                msg = build_commit_message(law, action)
+                if commit_one(repo_dir, msg, pub_date=pub_date):
+                    commits += 1
+                path_tracker[law_id] = written_path
+                success += 1
+            else:
+                fail += 1
+            time.sleep(REQUEST_DELAY)
 
     print(f"처리 완료: 성공 {success}건, 실패 {fail}건, 커밋 {commits}건")
 
-    # 6. 푸시
+    # 7. 푸시
     if commits > 0:
         git_cmd(["push", "origin", "main"], cwd=repo_dir)
         print(f"푸시 완료: {commits}건 커밋")

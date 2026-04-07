@@ -12,7 +12,7 @@ from tqdm import tqdm
 from config import API_KEY, PAGE_SIZE, REQUEST_DELAY, SEARCH_URL
 
 
-def fetch_page(page: int) -> ET.Element:
+def fetch_page(page: int, retries: int = 3) -> ET.Element:
     """법령 목록 API의 특정 페이지를 조회한다."""
     params = {
         "OC": API_KEY,
@@ -21,9 +21,18 @@ def fetch_page(page: int) -> ET.Element:
         "display": PAGE_SIZE,
         "page": page,
     }
-    resp = requests.get(SEARCH_URL, params=params, timeout=30)
-    resp.raise_for_status()
-    return ET.fromstring(resp.content)
+    for attempt in range(retries):
+        try:
+            resp = requests.get(SEARCH_URL, params=params, timeout=60)
+            resp.raise_for_status()
+            return ET.fromstring(resp.content)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt < retries - 1:
+                wait = 5 * (attempt + 1)
+                print(f"\n[재시도] 페이지 {page} 요청 실패 ({e}), {wait}초 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def parse_item(item: ET.Element) -> dict:
