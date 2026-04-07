@@ -190,13 +190,62 @@ def ensure_repo(repo_dir: str):
         )
 
 
-def commit_and_push(repo_dir: str, message: str) -> bool:
-    """변경 사항을 커밋하고 푸시한다."""
+def build_commit_message(law: dict, action: str) -> str:
+    """법령 정보로 커밋 메시지를 생성한다."""
+    name = law.get("법령명한글") or law.get("법령명", "")
+    law_type = law.get("법령구분명") or law.get("법령구분", "")
+    pub_date = law.get("공포일자", "")
+    ef_date = law.get("시행일자", "")
+    pub_no = law.get("공포번호", "").strip()
+    ministry = law.get("소관부처명", "").strip()
+    amend_type = law.get("제개정구분명", "").strip()
+
+    # 제목줄
+    if amend_type:
+        title = f"{name} {amend_type}"
+    else:
+        title = f"{name} {action}"
+
+    # 본문
+    body_lines = []
+    if law_type:
+        body_lines.append(f"법령구분: {law_type}")
+    if pub_no:
+        body_lines.append(f"공포번호: {pub_no}")
+    if pub_date:
+        body_lines.append(f"공포일자: {format_date(pub_date)}")
+    if ef_date:
+        body_lines.append(f"시행일자: {format_date(ef_date)}")
+    if ministry:
+        body_lines.append(f"소관부처: {ministry}")
+
+    if body_lines:
+        return title + "\n\n" + "\n".join(body_lines)
+    return title
+
+
+def format_date(date_str: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD 표시용."""
+    date_str = date_str.replace("-", "")
+    if len(date_str) == 8:
+        return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    return date_str
+
+
+def format_git_date(date_str: str) -> str:
+    """공포일자(YYYYMMDD)를 Git 날짜 형식으로 변환한다."""
+    date_str = date_str.replace("-", "")
+    if len(date_str) == 8:
+        return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 12:00:00 +0900"
+    return date_str
+
+
+def commit_one(repo_dir: str, message: str, pub_date: str = "") -> bool:
+    """단일 법령 변경을 커밋한다. pub_date가 있으면 커밋 날짜로 사용."""
     git_cmd(["add", "-A"], cwd=repo_dir)
 
     status = git_cmd(["status", "--porcelain"], cwd=repo_dir)
     if not status:
-        print("변경 사항 없음, 커밋 스킵")
         return False
 
     env = {
@@ -206,8 +255,12 @@ def commit_and_push(repo_dir: str, message: str) -> bool:
         "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
     }
 
+    if pub_date:
+        git_date = format_git_date(pub_date)
+        env["GIT_AUTHOR_DATE"] = git_date
+        env["GIT_COMMITTER_DATE"] = git_date
+
     git_cmd(["commit", "-m", message], cwd=repo_dir, env=env)
-    git_cmd(["push", "origin", "main"], cwd=repo_dir)
     return True
 
 
@@ -244,11 +297,17 @@ def main():
         print("변경 사항 없음. 종료합니다.")
         return
 
-    # 4. 삭제된 법령 처리
+    commits = 0
+
+    # 4. 삭제된 법령 처리 (각각 커밋)
     for law_info in changes["removed"]:
         remove_law_file(law_info)
+        msg = build_commit_message(law_info, "폐지")
+        pub_date = law_info.get("공포일자", "")
+        if commit_one(repo_dir, msg, pub_date=pub_date):
+            commits += 1
 
-    # 5. 추가/수정된 법령 처리
+    # 5. 추가/수정된 법령 처리 (각각 커밋)
     to_update = changes["added"] + changes["modified"]
     success = 0
     fail = 0
@@ -256,27 +315,23 @@ def main():
     for law in tqdm(to_update, desc="법령 업데이트"):
         existing_path = law.get("_existing_filepath")
         if process_law(law, existing_filepath=existing_path):
+            is_added = law in changes["added"]
+            action = "신규" if is_added else "변경"
+            msg = build_commit_message(law, action)
+            pub_date = law.get("공포일자", "")
+            if commit_one(repo_dir, msg, pub_date=pub_date):
+                commits += 1
             success += 1
         else:
             fail += 1
         time.sleep(REQUEST_DELAY)
 
-    print(f"처리 완료: 성공 {success}건, 실패 {fail}건")
+    print(f"처리 완료: 성공 {success}건, 실패 {fail}건, 커밋 {commits}건")
 
-    # 6. 커밋 & 푸시
-    commit_parts = []
-    if n_added:
-        commit_parts.append(f"추가 {n_added}건")
-    if n_modified:
-        commit_parts.append(f"수정 {n_modified}건")
-    if n_removed:
-        commit_parts.append(f"삭제 {n_removed}건")
-
-    commit_msg = f"법령 업데이트: {', '.join(commit_parts)}"
-    committed = commit_and_push(repo_dir, commit_msg)
-
-    if committed:
-        print(f"커밋 완료: {commit_msg}")
+    # 6. 푸시
+    if commits > 0:
+        git_cmd(["push", "origin", "main"], cwd=repo_dir)
+        print(f"푸시 완료: {commits}건 커밋")
     print("=== 증분 업데이트 완료 ===")
 
 
