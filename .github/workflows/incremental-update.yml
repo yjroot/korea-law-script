@@ -1,0 +1,44 @@
+name: 법령 증분 업데이트
+
+on:
+  schedule:
+    # 한국 업무시간(09~17시 KST) 동안 2시간 간격 실행
+    # KST = UTC+9 → UTC 0,2,4,6,8시
+    - cron: "0 0,2,4,6,8 * * 1-5"
+  workflow_dispatch: # 수동 실행 지원
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 스크립트 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: korea-law 저장소 체크아웃
+        uses: actions/checkout@v4
+        with:
+          repository: yjroot/korea-law
+          path: korea-law
+          token: ${{ secrets.KOREA_LAW_TOKEN }}
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: Git 설정 (korea-law)
+        run: |
+          cd korea-law
+          git config user.name "korea-law-bot"
+          git config user.email "bot@korea-law"
+
+      - name: 증분 업데이트 실행
+        env:
+          LAW_API_KEY: ${{ secrets.LAW_API_KEY }}
+          KOREA_LAW_DIR: ${{ github.workspace }}/korea-law
+        run: python incremental_update.py
