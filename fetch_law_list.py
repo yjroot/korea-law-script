@@ -12,7 +12,7 @@ from tqdm import tqdm
 from config import API_KEY, PAGE_SIZE, REQUEST_DELAY, SEARCH_URL
 
 
-def fetch_page(page: int, retries: int = 3) -> ET.Element:
+def fetch_page(page: int, retries: int = 3, extra_params: dict | None = None) -> ET.Element:
     """법령 목록 API의 특정 페이지를 조회한다."""
     params = {
         "OC": API_KEY,
@@ -21,6 +21,8 @@ def fetch_page(page: int, retries: int = 3) -> ET.Element:
         "display": PAGE_SIZE,
         "page": page,
     }
+    if extra_params:
+        params.update(extra_params)
     for attempt in range(retries):
         try:
             resp = requests.get(SEARCH_URL, params=params, timeout=60)
@@ -56,6 +58,31 @@ def parse_item(item: ET.Element) -> dict:
     }
 
 
+def _fetch_laws(extra_params: dict | None = None, desc: str = "법령 목록 수집") -> list[dict]:
+    """법령 목록을 수집한다 (공통 로직)."""
+    root = fetch_page(1, extra_params=extra_params)
+    total_cnt_el = root.find("totalCnt")
+    if total_cnt_el is None or not total_cnt_el.text:
+        raise RuntimeError(f"API 응답에서 totalCnt를 찾을 수 없습니다: {ET.tostring(root, encoding='unicode')[:500]}")
+
+    total_cnt = int(total_cnt_el.text)
+    total_pages = math.ceil(total_cnt / PAGE_SIZE)
+    print(f"법령 수: {total_cnt}, 총 페이지: {total_pages}")
+
+    laws = []
+    for item in root.iter("law"):
+        laws.append(parse_item(item))
+
+    for page in tqdm(range(2, total_pages + 1), desc=desc, initial=1, total=total_pages):
+        time.sleep(REQUEST_DELAY)
+        root = fetch_page(page, extra_params=extra_params)
+        for item in root.iter("law"):
+            laws.append(parse_item(item))
+
+    print(f"수집 완료: {len(laws)}건")
+    return laws
+
+
 def fetch_all_laws() -> list[dict]:
     """전체 법령 목록을 수집한다."""
     if not API_KEY:
@@ -63,32 +90,25 @@ def fetch_all_laws() -> list[dict]:
             "API 키가 설정되지 않았습니다. "
             "환경변수 LAW_API_KEY를 설정하거나 config.py에서 직접 입력하세요."
         )
+    return _fetch_laws(desc="전체 법령 수집")
 
-    # 첫 페이지로 전체 건수 파악
-    root = fetch_page(1)
-    total_cnt_el = root.find("totalCnt")
-    if total_cnt_el is None or not total_cnt_el.text:
-        raise RuntimeError(f"API 응답에서 totalCnt를 찾을 수 없습니다: {ET.tostring(root, encoding='unicode')[:500]}")
 
-    total_cnt = int(total_cnt_el.text)
-    total_pages = math.ceil(total_cnt / PAGE_SIZE)
-    print(f"전체 법령 수: {total_cnt}, 총 페이지: {total_pages}")
+def fetch_laws_since(date_from: str) -> list[dict]:
+    """특정 공포일자 이후의 법령만 수집한다.
 
-    laws = []
-
-    # 첫 페이지 결과 처리
-    for item in root.iter("law"):
-        laws.append(parse_item(item))
-
-    # 나머지 페이지
-    for page in tqdm(range(2, total_pages + 1), desc="법령 목록 수집", initial=1, total=total_pages):
-        time.sleep(REQUEST_DELAY)
-        root = fetch_page(page)
-        for item in root.iter("law"):
-            laws.append(parse_item(item))
-
-    print(f"수집 완료: {len(laws)}건")
-    return laws
+    Args:
+        date_from: 시작 공포일자 (YYYYMMDD 형식)
+    """
+    if not API_KEY:
+        raise RuntimeError(
+            "API 키가 설정되지 않았습니다. "
+            "환경변수 LAW_API_KEY를 설정하거나 config.py에서 직접 입력하세요."
+        )
+    # ancYd: 공포일자 범위 (YYYYMMDD~YYYYMMDD)
+    today = time.strftime("%Y%m%d")
+    extra = {"ancYd": f"{date_from}~{today}"}
+    print(f"공포일자 {date_from}~{today} 범위 조회")
+    return _fetch_laws(extra_params=extra, desc="최근 법령 수집")
 
 
 def main():

@@ -14,8 +14,10 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+from datetime import datetime, timedelta
+
 from config import API_KEY, OUTPUT_DIR, REQUEST_DELAY, get_law_type_dir
-from fetch_law_list import fetch_all_laws
+from fetch_law_list import fetch_all_laws, fetch_laws_since
 from fetch_law_content import (
     convert_law_to_markdown,
     fetch_law_content,
@@ -298,13 +300,35 @@ def main():
     existing = scan_existing_laws(repo_dir)
     print(f"기존 법령 수: {len(existing)}")
 
-    # 2. 최신 목록 수집
-    print("최신 법령 목록 수집 중...")
-    new_laws = fetch_all_laws()
-    print(f"최신 법령 수: {len(new_laws)}")
+    # 2. 최근 변경된 법령만 수집
+    #    기존 법령 중 가장 최근 공포일자에서 30일 전부터 조회
+    #    (여유를 두어 누락 방지)
+    max_pub = max(
+        (v.get("공포일자", "").replace("-", "") for v in existing.values()),
+        default="",
+    )
+    if max_pub:
+        try:
+            since_date = datetime.strptime(max_pub, "%Y%m%d") - timedelta(days=30)
+            since_str = since_date.strftime("%Y%m%d")
+        except ValueError:
+            since_str = ""
+    else:
+        since_str = ""
 
-    # 3. 변경 사항 비교
-    changes = find_changes(existing, new_laws)
+    if since_str:
+        print(f"최근 법령 목록 수집 중 (공포일자 {since_str} 이후)...")
+        recent_laws = fetch_laws_since(since_str)
+        print(f"최근 변경 법령 수: {len(recent_laws)}")
+    else:
+        print("기준 날짜 없음, 전체 목록 수집...")
+        recent_laws = fetch_all_laws()
+        print(f"전체 법령 수: {len(recent_laws)}")
+
+    # 3. 변경 사항 비교 (최근 법령만 대상, 삭제는 감지 불가)
+    changes = find_changes(existing, recent_laws)
+    # 날짜 범위 조회이므로 removed는 무시 (실제 폐지가 아닌 범위 밖 법령)
+    changes["removed"] = []
     n_added = len(changes["added"])
     n_modified = len(changes["modified"])
     n_removed = len(changes["removed"])
